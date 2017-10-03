@@ -1,5 +1,5 @@
 /*
-	active-resource 0.9.6
+	active-resource 1.0.0
 	(c) 2017 Nick Landgrebe && Peak Labs, LLC DBA Occasion App
 	active-resource may be freely distributed under the MIT license
 	Portions of active-resource were inspired by or borrowed from Rail's ActiveRecord library
@@ -8,20 +8,22 @@
 (function (root, factory) {
     if (typeof define === 'function' && define.amd) {
         // AMD. Register as an anonymous module.
-        define(['jquery', 'underscore', 'underscore.string', 'underscore.inflection'], factory);
+        define(['axios', 'es6-promise', 'underscore', 'underscore.string', 'qs', 'underscore.inflection'], factory);
     } else if (typeof exports === 'object') {
         // Node. Does not work with strict CommonJS, but
         // only CommonJS-like enviroments that support module.exports,
         // like Node.
         require('underscore.inflection');
-        module.exports = factory(require('jquery'), require('underscore'), require('underscore.string'));
+        module.exports = factory(require('axios'), require('es6-promise'), require('underscore'), require('underscore.string'), require('qs'));
     } else {
         // Browser globals (root is window)
-        root.ActiveResource = factory(root.jQuery, root._, root.s);
+        root.ActiveResource = factory(root.axios, root.es6Promise, root._, root.s, root.Qs);
     }
-}(this, function(jQuery, _, s) {
+}(this, function(axios, es6Promise, _, s, Qs) {
 
 var ActiveResource = function(){};
+
+window.Promise = es6Promise.Promise;
 
 (function() {
   ActiveResource.extend = function(klass, mixin) {
@@ -143,14 +145,24 @@ var ActiveResource = function(){};
       Base.prototype.request = function(url, method, data) {
         var options;
         options = {
-          contentType: 'application/json',
-          dataType: 'json',
-          headers: this.resourceLibrary.headers,
+          responseType: 'json',
+          headers: _.extend(this.resourceLibrary.headers, {
+            'Content-Type': 'application/json'
+          }),
           method: method,
           url: url
         };
-        options['data'] = method === 'GET' ? data : JSON.stringify(data);
-        return jQuery.ajax(options);
+        if (method === 'GET') {
+          options.params = data;
+          options.paramsSerializer = function(params) {
+            return Qs.stringify(params, {
+              arrayFormat: 'brackets'
+            });
+          };
+        } else {
+          options.data = data;
+        }
+        return axios(options);
       };
 
       Base.prototype.get = function(url, queryParams) {
@@ -198,11 +210,12 @@ var ActiveResource = function(){};
     }
 
     JsonApi.prototype.request = function(url, method, data) {
-      return JsonApi.__super__.request.apply(this, arguments).then(function(response, textStatus, xhr) {
-        if (!(((response != null ? response.data : void 0) != null) || xhr.status === 204)) {
+      return JsonApi.__super__.request.apply(this, arguments).then(function(response) {
+        var _ref1;
+        if (!((((_ref1 = response.data) != null ? _ref1.data : void 0) != null) || response.status === 204)) {
           throw "Response from " + url + " was not in JSON API format";
         }
-        return response;
+        return response.data;
       });
     };
 
@@ -517,7 +530,7 @@ var ActiveResource = function(){};
           return built.first();
         }
       }, function(errors) {
-        return _this.parameterErrors(errors.responseJSON['errors']);
+        return Promise.reject(_this.parameterErrors(errors.response.data['errors']));
       });
     };
 
@@ -550,9 +563,9 @@ var ActiveResource = function(){};
         }
       }, function(errors) {
         if (options['onlyResourceIdentifiers']) {
-          return errors;
+          return Promise.reject(errors);
         } else {
-          return _this.resourceErrors(resourceData, errors.responseJSON['errors']);
+          return Promise.reject(_this.resourceErrors(resourceData, errors.response.data['errors']));
         }
       });
     };
@@ -587,9 +600,9 @@ var ActiveResource = function(){};
         }
       }, function(errors) {
         if (options['onlyResourceIdentifiers']) {
-          return errors;
+          return Promise.reject(errors);
         } else {
-          return _this.resourceErrors(resourceData, errors.responseJSON['errors']);
+          return Promise.reject(_this.resourceErrors(resourceData, errors.response.data['errors']));
         }
       });
     };
@@ -623,9 +636,9 @@ var ActiveResource = function(){};
         }
       }, function(errors) {
         if (options['onlyResourceIdentifiers']) {
-          return errors;
+          return Promise.reject(errors);
         } else {
-          return _this.resourceErrors(resourceData, errors.responseJSON['errors']);
+          return Promise.reject(_this.resourceErrors(resourceData, errors.response.data['errors']));
         }
       });
     };
@@ -643,8 +656,10 @@ var ActiveResource = function(){};
       } : {};
       _this = this;
       return this.request(url, 'DELETE', data).then(null, function(errors) {
-        if (errors.responseJSON) {
-          return _this.parameterErrors(errors.responseJSON['errors']);
+        if (errors.response.data) {
+          return Promise.reject(_this.parameterErrors(errors.response.data['errors']));
+        } else {
+          return Promise.reject(null);
         }
       });
     };
@@ -1055,14 +1070,14 @@ var ActiveResource = function(){};
       return this.reset();
     };
 
-    Errors.prototype.add = function(attribute, code, detail) {
+    Errors.prototype.add = function(field, code, detail) {
       var error, _base;
       if (detail == null) {
         detail = '';
       }
-      (_base = this.__errors)[attribute] || (_base[attribute] = []);
-      this.__errors[attribute].push(error = {
-        attribute: attribute,
+      (_base = this.__errors)[field] || (_base[field] = []);
+      this.__errors[field].push(error = {
+        field: field,
         code: code,
         detail: detail,
         message: detail
@@ -1072,19 +1087,19 @@ var ActiveResource = function(){};
 
     Errors.prototype.push = function(error) {
       var _base, _name;
-      (_base = this.__errors)[_name = error.attribute] || (_base[_name] = []);
-      this.__errors[error.attribute].push(error);
+      (_base = this.__errors)[_name = error.field] || (_base[_name] = []);
+      this.__errors[error.field].push(error);
       return error;
     };
 
-    Errors.prototype.added = function(attribute, code) {
-      return ActiveResource.prototype.Collection.build(this.__errors[attribute]).detect(function(e) {
+    Errors.prototype.added = function(field, code) {
+      return ActiveResource.prototype.Collection.build(this.__errors[field]).detect(function(e) {
         return e.code === code;
       }) != null;
     };
 
-    Errors.prototype.include = function(attribute) {
-      return (this.__errors[attribute] != null) && _.size(this.__errors[attribute]) > 0;
+    Errors.prototype.include = function(field) {
+      return (this.__errors[field] != null) && _.size(this.__errors[field]) > 0;
     };
 
     Errors.prototype.empty = function() {
@@ -1095,39 +1110,48 @@ var ActiveResource = function(){};
       return _.size(this.toArray());
     };
 
-    Errors.prototype["delete"] = function(attribute) {
-      return this.__errors[attribute] = [];
+    Errors.prototype["delete"] = function(field) {
+      return this.__errors[field] = [];
     };
 
     Errors.prototype.each = function(iterator) {
-      return _.each(this.__errors, function(errors, attribute) {
+      return _.each(this.__errors, function(errors, field) {
         var error, _i, _len, _results;
         _results = [];
         for (_i = 0, _len = errors.length; _i < _len; _i++) {
           error = errors[_i];
-          _results.push(iterator(attribute, error));
+          _results.push(iterator(field, error));
         }
         return _results;
       });
     };
 
-    Errors.prototype.forAttribute = function(attribute) {
-      return ActiveResource.prototype.Collection.build(this.__errors[attribute]).inject({}, function(out, error) {
-        out[error.code] = error.message;
+    Errors.prototype.forField = function(field) {
+      var _this = this;
+      return ActiveResource.prototype.Collection.build(_.keys(this.__errors)).select(function(k) {
+        return s.startsWith(k, field);
+      }).map(function(k) {
+        return _this.__errors[k];
+      }).flatten();
+    };
+
+    Errors.prototype.detailsForField = function(field) {
+      return this.forField(field).inject({}, function(out, error) {
+        out[error.code] = error.detail;
         return out;
       });
     };
 
     Errors.prototype.forBase = function() {
-      return this.forAttribute('base');
+      return this.forField('base');
     };
 
     Errors.prototype.toArray = function() {
-      var attribute, errors, output, _ref;
+      var errors, field, output, _ref;
       output = [];
       _ref = this.__errors;
-      for (attribute in _ref) {
-        errors = _ref[attribute];
+      for (field in _ref) {
+        errors = _ref[field];
         output.push.apply(output, errors);
       }
       return output;
@@ -1235,7 +1259,7 @@ var ActiveResource = function(){};
     };
 
     Persistence.save = function(callback) {
-      return this.__createOrUpdate().always(callback);
+      return this.__createOrUpdate().then(callback, callback);
     };
 
     Persistence.update = function(attributes, callback) {
@@ -1245,7 +1269,7 @@ var ActiveResource = function(){};
       return this.__createOrUpdate().then(null, function(resource) {
         resource.assignAttributes(oldAttributes);
         return resource;
-      }).always(callback);
+      }).then(callback, callback);
     };
 
     Persistence.destroy = function() {
@@ -1987,7 +2011,7 @@ var ActiveResource = function(){};
           _this.target = loadedTarget;
           _this.loaded(true);
           return loadedTarget;
-        }).fail(function() {
+        })["catch"](function() {
           return _this.reset();
         });
       } else {
